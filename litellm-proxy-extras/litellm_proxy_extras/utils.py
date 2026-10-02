@@ -1340,7 +1340,7 @@ class ProxyExtrasDBManager:
                         return True
                     except subprocess.CalledProcessError as e:
                         stderr: Final = str(e.stderr or "")
-                        logger.info(f"prisma db error: {stderr}, e: {e.stdout}")
+                        logger.error(f"prisma db error: {stderr}, e: {e.stdout}")
                         if "P3009" in stderr:
                             # Extract the failed migration name from the error message
                             migration_match = re.search(
@@ -1532,7 +1532,7 @@ class ProxyExtrasDBManager:
                     )
                     return True
             except subprocess.TimeoutExpired:
-                logger.warning(
+                logger.error(
                     "Attempt %s timed out. Raise %s if this database needs longer to apply its schema.",
                     attempt + 1,
                     PRISMA_MIGRATE_DEPLOY_TIMEOUT_ENV_VAR if use_migrate else PRISMA_COMMAND_TIMEOUT_ENV_VAR,
@@ -1545,7 +1545,7 @@ class ProxyExtrasDBManager:
                     if attempts_left > 0
                     else ""
                 )
-                logger.info(f"The process failed to execute. Details: {e}.{retry_msg}")
+                logger.error(f"The process failed to execute. Details: {e}.{retry_msg}")
                 time.sleep(random.randrange(5, 15))
             finally:
                 os.chdir(original_dir)

@@ -1,6 +1,8 @@
 import glob
+import logging
 import os
 import re
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -1166,3 +1168,101 @@ class TestMigrationJobOwnedDrift:
         assert 'PRIMARY KEY ("request_id")' not in filtered
         assert "LiteLLM_SpendLogs_legacy" not in filtered
         assert 'ALTER TABLE "LiteLLM_BudgetTable" ADD COLUMN     "updated_by" TEXT;' in filtered
+
+
+_P3018_UNCLASSIFIED_STDERR: Final = (
+    "Error: P3018\n\n"
+    "A migration failed to apply. New migrations cannot be applied before the error is "
+    "recovered from.\n\n"
+    "Migration name: 20260921190000_agent_identity\n\n"
+    "Database error code: 23505\n\n"
+    "Database error:\n"
+    'ERROR: could not create unique index "agent_identity_key"\n'
+    "DETAIL: Key (agent_id)=(agent-1) is duplicated.\n"
+)
+
+
+class TestV1MigrationFailuresLogAtError:
+    @staticmethod
+    def _run_v1_migrations(
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        outcome: BaseException,
+    ) -> tuple[bool, list[list[str]]]:
+        import litellm_proxy_extras.utils as utils_module
+
+        deploy_calls: Final[list[list[str]]] = []
+
+        def fake_run_prisma(cmd: list[str], **kwargs: object) -> None:
+            assert cmd[1:] == ["migrate", "deploy"], f"unexpected prisma command: {cmd}"
+            deploy_calls.append(cmd)
+            raise outcome
+
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.setenv("LITELLM_MIGRATION_DIR", str(tmp_path))
+        monkeypatch.setattr(utils_module.prisma_toolchain, "run_prisma", fake_run_prisma)
+        monkeypatch.setattr(utils_module, "_get_prisma_env", lambda: {})
+        monkeypatch.setattr(utils_module.time, "sleep", lambda seconds: None)
+
+        succeeded: Final = ProxyExtrasDBManager._run_migrations(use_migrate=True, use_v2_resolver=False)
+        return succeeded, deploy_calls
+
+    @staticmethod
+    def _error_messages(caplog: pytest.LogCaptureFixture) -> list[str]:
+        return [record.getMessage() for record in caplog.records if record.levelno >= logging.ERROR]
+
+    def test_an_unrecognized_prisma_error_logs_its_stderr_at_error(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        stderr: Final = "Error: P1001: Can't reach database server at db:5432"
+        with caplog.at_level(logging.ERROR, logger="litellm_proxy_extras"):
+            succeeded, deploy_calls = self._run_v1_migrations(
+                monkeypatch,
+                tmp_path,
+                subprocess.CalledProcessError(1, ["prisma"], stderr=stderr),
+            )
+
+        assert succeeded is False
+        assert len(deploy_calls) == 4
+        assert any(stderr in message for message in self._error_messages(caplog))
+
+    def test_an_unclassified_p3018_logs_its_stderr_and_retry_failure_at_error(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.ERROR, logger="litellm_proxy_extras"):
+            succeeded, deploy_calls = self._run_v1_migrations(
+                monkeypatch,
+                tmp_path,
+                subprocess.CalledProcessError(1, ["prisma"], stderr=_P3018_UNCLASSIFIED_STDERR),
+            )
+
+        assert succeeded is False
+        assert len(deploy_calls) == 4
+        messages: Final = self._error_messages(caplog)
+        assert any(
+            "20260921190000_agent_identity" in message and "is duplicated" in message
+            for message in messages
+        )
+        assert any(
+            "The process failed to execute" in message and "Retrying... (3 attempts left)" in message
+            for message in messages
+        )
+
+    def test_a_timeout_logs_at_error_naming_the_migrate_deploy_timeout_env_var(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from litellm_proxy_extras.prisma_toolchain import PRISMA_MIGRATE_DEPLOY_TIMEOUT_ENV_VAR
+
+        with caplog.at_level(logging.ERROR, logger="litellm_proxy_extras"):
+            succeeded, deploy_calls = self._run_v1_migrations(
+                monkeypatch,
+                tmp_path,
+                subprocess.TimeoutExpired(["prisma"], 1),
+            )
+
+        assert succeeded is False
+        assert len(deploy_calls) == 4
+        assert any(
+            "timed out" in message and PRISMA_MIGRATE_DEPLOY_TIMEOUT_ENV_VAR in message
+            for message in self._error_messages(caplog)
+        )
