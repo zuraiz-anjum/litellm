@@ -49,6 +49,7 @@ import MCPConnectionStatus from "./mcp_connection_status";
 import MCPToolConfiguration from "./mcp_tool_configuration";
 import StdioConfiguration from "./StdioConfiguration";
 import MCPPermissionManagement from "./MCPPermissionManagement";
+import ApprovalPolicySection from "./ApprovalPolicySection";
 import OpenAPIFormSection, { OpenAPIKeyTool } from "./OpenAPIFormSection";
 import MCPLogoSelector from "./MCPLogoSelector";
 import EnvVarsSection from "./EnvVarsSection";
@@ -92,6 +93,8 @@ const payloadErrorMessage = (result: Exclude<BuildCreatePayloadResult, { kind: "
       return "Invalid JSON in stdio configuration";
     case "invalid_token_validation_json":
       return "Invalid JSON in Token Validation Rules";
+    case "invalid_approval_policy":
+      return "Tools requiring approval also need an issuer and a JWKS URL";
   }
 };
 
@@ -932,6 +935,10 @@ const CreateMCPServer: React.FC<CreateMCPServerProps> = ({
                     mcpServer={null}
                     mountedAuthType={authSectionMounted ? watchedAuthType : undefined}
                   />
+                </div>
+
+                <div className="mt-8">
+                  <ApprovalPolicySection />
                 </div>
 
                 {/* Connection Status Section */}
